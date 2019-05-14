@@ -24,6 +24,8 @@ extern uct_md_component_t uct_cuda_ipc_md_component;
  */
 typedef struct uct_cuda_ipc_md {
     struct uct_md super;   /**< Domain info */
+    CUuuid *uuid_map;     /* List of UUIDs for cuda devices */
+    int    uuid_map_len;
 } uct_cuda_ipc_md_t;
 
 
@@ -43,6 +45,7 @@ typedef struct uct_cuda_ipc_key {
     CUdeviceptr    d_bptr;       /* Allocation base address */
     size_t         b_len;        /* Allocation size */
     int            dev_num;      /* GPU Device number */
+    CUuuid         uuid;         /* GPU Device UUID */
 } uct_cuda_ipc_key_t;
 
 

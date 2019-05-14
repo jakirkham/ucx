@@ -54,15 +54,26 @@ static ucs_status_t uct_cuda_ipc_rkey_unpack(uct_md_component_t *mdc,
                                              void **handle_p)
 {
     uct_cuda_ipc_key_t *packed = (uct_cuda_ipc_key_t *) rkey_buffer;
+    uct_cuda_ipc_md_t *md = mdc->priv; /* cuda_ipc_mdc->priv points to uct_md */
     uct_cuda_ipc_key_t *key;
     ucs_status_t status;
     CUdevice cu_device;
+    CUdevice peer_cu_device;
     int peer_accessble;
+    int i;
 
     UCT_CUDA_IPC_GET_DEVICE(cu_device);
 
+    peer_cu_device = -1;
+    for (i = 0; i < md->uuid_map_len; i++) {
+        
+        if (!memcmp((void *) &(md->uuid_map[i]), (void *) &packed->uuid, sizeof(packed->uuid))) {
+            peer_cu_device = i;
+        }
+    }
+    
     status = UCT_CUDADRV_FUNC(cuDeviceCanAccessPeer(&peer_accessble,
-                                                    cu_device, packed->dev_num));
+                                                    cu_device, peer_cu_device));
     if ((status != UCS_OK) || (peer_accessble == 0)) {
         return UCS_ERR_UNREACHABLE;
     }
@@ -110,6 +121,12 @@ uct_cuda_ipc_mem_reg_internal(uct_md_h uct_md, void *addr, size_t length,
                                           &(key->b_len),
                                           (CUdeviceptr) addr));
     key->dev_num  = (int) cu_device;
+
+    status = UCT_CUDADRV_FUNC(cuDeviceGetUuid(&(key->uuid), key->dev_num));
+    if (UCS_OK != status) {
+        return status;
+    }
+    
     ucs_trace("registered memory:%p..%p length:%lu dev_num:%d",
               addr, addr + length, length, (int) cu_device);
     return UCS_OK;
@@ -158,24 +175,81 @@ static ucs_status_t uct_cuda_ipc_query_md_resources(uct_md_resource_desc_t **res
     return uct_single_md_resource(&uct_cuda_ipc_md_component, resources_p, num_resources_p);
 }
 
+static void uct_cuda_ipc_md_close(uct_md_h uct_md)
+{
+    uct_cuda_ipc_md_t *md = ucs_derived_of(uct_md, uct_cuda_ipc_md_t);
+    if (NULL != md->uuid_map) {
+        ucs_free(md->uuid_map);
+    }
+    ucs_free(md);
+}
+
 static ucs_status_t uct_cuda_ipc_md_open(const char *md_name, const uct_md_config_t *md_config,
                                          uct_md_h *md_p)
 {
+    uct_cuda_ipc_md_t *cuda_ipc_md;
+    ucs_status_t status;
+    int device_count;
+    int i;
+    CUuuid own_uuid;
+    CUdevice own_cu_device;
+
+    cuda_ipc_md = ucs_malloc(sizeof(*cuda_ipc_md), "uct_cuda_ipc_md_t");
+    if (cuda_ipc_md == NULL) {
+        ucs_error("Failed to allocate memory for uct_cuda_ipc_md_t");
+        status = UCS_ERR_NO_MEMORY;
+        goto err;
+    }
+    
+    cuda_ipc_md->uuid_map = NULL;
+    cuda_ipc_md->uuid_map_len = -1;
+        
+    status = UCT_CUDADRV_FUNC(cuDeviceGetCount(&device_count));
+    if (status != UCS_OK) {
+	return UCS_ERR_IO_ERROR;
+    }
+        
+    cuda_ipc_md->uuid_map = ucs_malloc(sizeof(CUuuid) * device_count, "uct_cuda_ipc_uuid_map");
+    if (NULL == cuda_ipc_md->uuid_map) {
+	ucs_error("failed to allocate memory for uct_cuda_ipc_uuid_map");
+	return UCS_ERR_NO_MEMORY;
+    }
+        
+    for (i = 0; i < device_count; i++) {
+
+	status = UCT_CUDADRV_FUNC(cuDeviceGet(&own_cu_device, i));
+	if (status != UCS_OK) {
+	    return UCS_ERR_IO_ERROR;
+	}
+        
+	status = UCT_CUDADRV_FUNC(cuDeviceGetUuid(&own_uuid, own_cu_device));
+	if (status != UCS_OK) {
+	    return UCS_ERR_IO_ERROR;
+	}
+            
+	cuda_ipc_md->uuid_map[i] = own_uuid;
+    }
+        
+    cuda_ipc_md->uuid_map_len = device_count;
+    
     static uct_md_ops_t md_ops = {
-        .close        = (void*)ucs_empty_function,
+        .close        = uct_cuda_ipc_md_close,
         .query        = uct_cuda_ipc_md_query,
         .mkey_pack    = uct_cuda_ipc_mkey_pack,
         .mem_reg      = uct_cuda_ipc_mem_reg,
         .mem_dereg    = uct_cuda_ipc_mem_dereg,
         .is_mem_type_owned = uct_cuda_is_mem_type_owned,
     };
-    static uct_md_t md = {
-        .ops          = &md_ops,
-        .component    = &uct_cuda_ipc_md_component
-    };
 
-    *md_p = &md;
+    cuda_ipc_md->super.ops = &md_ops;
+    cuda_ipc_md->super.component = &uct_cuda_ipc_md_component;
+    cuda_ipc_md->super.component->priv = (void *) cuda_ipc_md;
+
+    *md_p = &cuda_ipc_md->super;
     return UCS_OK;
+    
+err:
+    return status;
 }
 
 UCT_MD_COMPONENT_DEFINE(uct_cuda_ipc_md_component, UCT_CUDA_IPC_MD_NAME,
