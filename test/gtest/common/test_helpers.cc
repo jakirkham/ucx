@@ -333,6 +333,31 @@ bool is_rdmacm_netdev(const char *ifa_name) {
     return strstr(guid_buf, "0000:0000:0000:0000") == NULL;
 }
 
+bool is_sockcm_netdev(const char *ifa_name) {
+    char file_name[PATH_MAX];
+    int ch;
+    FILE *fp;
+
+    /*
+     * check if the device is an ethernet device
+     * https://elixir.bootlin.com/linux/latest/source/include/uapi/linux/if_arp.h#L31
+     */
+    snprintf(file_name, PATH_MAX, "/sys/class/net/%s/type", ifa_name);
+    fp = fopen(file_name, "r");
+    if (fp == NULL) {
+        return false;
+    }
+
+    ch =  fgetc(fp);
+    if ((char) ch == '1') {
+        fclose(fp);
+        return true;
+    } else {
+        fclose(fp);
+        return false;
+    }
+}
+
 uint16_t get_port() {
     int sock_fd, ret;
     ucs_status_t status;
